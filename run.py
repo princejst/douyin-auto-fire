@@ -1,3 +1,4 @@
+import cloud_verify  # Install strict recipient guard and reload verification.
 from app.accounts import load_accounts
 from app.account_runner import run_all_accounts
 from app.config import ConfigError
