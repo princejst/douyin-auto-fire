@@ -1,0 +1,23 @@
+{
+  "friends": [
+    "Jessicattt"
+  ],
+  "messages": [
+    {
+      "type": "douyin_sticker",
+      "value": "火花"
+    }
+  ],
+  "prevent_duplicates": false,
+  "send_interval_seconds": {
+    "max": 8,
+    "min": 3
+  },
+  "stickers": {
+    "火花": {
+      "accessible_name": "续火花"
+    }
+  },
+  "target_open_retries": 1,
+  "target_open_timeout_seconds": 15
+}
