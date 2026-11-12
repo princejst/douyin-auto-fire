@@ -1,9 +1,12 @@
 """Conservative cloud test: a local bubble alone is not delivery proof."""
 from collections import Counter
+import asyncio
+import json
 import logging
+from urllib.parse import urlsplit
 
 import app.main as runner
-from app.browser import open_private_messages, verify_login
+from app.browser import RiskControlError, open_private_messages, verify_login
 from app.douyin import PageOperationError
 from app.sender import OUTGOING_MESSAGES
 
@@ -43,7 +46,55 @@ def persisted_delta(before, sent, reloaded):
     return bool(delta) and any(reloaded[key] > before[key] for key in delta)
 
 
+async def stop_on_kick(page, operation):
+    """Abort the current send before retrying a server-rejected session."""
+    rejected = asyncio.Event()
+    inspectors = set()
+
+    async def inspect(response):
+        try:
+            body = await asyncio.wait_for(response.body(), timeout=5)
+            if len(body) <= 4096:
+                data = json.loads(body)
+                if isinstance(data, dict) and data.get("decision") == "KICK":
+                    rejected.set()
+        except (Exception, asyncio.CancelledError):
+            # Ordinary successful replies are protobuf, not JSON. The existing
+            # UI and reload checks remain required for those replies.
+            pass
+
+    def response_received(response):
+        url = urlsplit(response.url)
+        if url.hostname == "imapi.douyin.com" and url.path == "/v1/message/send":
+            task = asyncio.create_task(inspect(response))
+            inspectors.add(task)
+            task.add_done_callback(inspectors.discard)
+
+    page.on("response", response_received)
+    send_task = asyncio.create_task(operation())
+    rejection_task = asyncio.create_task(rejected.wait())
+    try:
+        await asyncio.wait((send_task, rejection_task), return_when=asyncio.FIRST_COMPLETED)
+        if send_task.done() and inspectors:
+            await asyncio.gather(*tuple(inspectors), return_exceptions=True)
+        if rejected.is_set():
+            LOGGER.error("抖音发送接口返回 KICK：立即停止当前任务，不再重试，需要在运行环境中重新登录验证")
+            raise RiskControlError("发送接口拒绝当前会话（KICK），已停止发送和重试")
+        return await send_task
+    finally:
+        page.remove_listener("response", response_received)
+        cleanup = (send_task, rejection_task, *tuple(inspectors))
+        for task in cleanup:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*cleanup, return_exceptions=True)
+
+
 async def verified_send(page, chat, message, stickers):
+    return await stop_on_kick(page, lambda: _verified_send(page, chat, message, stickers))
+
+
+async def _verified_send(page, chat, message, stickers):
     before = await fingerprints(page)
     await original_send(page, chat, message, stickers)
     # A delayed failure must not get counted as success after a two-second grace.
