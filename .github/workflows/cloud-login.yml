@@ -1,0 +1,70 @@
+name: Cloud QR Login Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: douyin-daily-sender
+  cancel-in-progress: false
+
+jobs:
+  login-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DOUYIN_CONFIG: ${{ secrets.DOUYIN_CONFIG }}
+      TRACE: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt 'cryptography>=46,<51'
+      - run: python -m playwright install --with-deps chromium
+      - name: Open cloud browser for QR login
+        shell: bash
+        run: |
+          printf '%s' "$DOUYIN_CONFIG" > config.json
+          mkdir -p cloud-login-output
+          xvfb-run -a python -u cloud_login.py > cloud-login-output/run.log 2>&1 &
+          for attempt in $(seq 1 90); do
+            if test -f cloud-login-output/qr.ready; then exit 0; fi
+            if test -f cloud-login-output/exit-code.txt; then
+              cat cloud-login-output/run.log
+              exit 1
+            fi
+            sleep 1
+          done
+          echo 'Cloud login page did not become ready'
+          exit 1
+      - name: Publish login QR page
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-login-qr-${{ github.run_id }}
+          path: cloud-login-output/scan-login.png
+          retention-days: 1
+      - name: Wait for owner login and single-recipient test
+        shell: bash
+        run: |
+          for attempt in $(seq 1 660); do
+            if test -f cloud-login-output/exit-code.txt; then
+              cat cloud-login-output/run.log
+              exit "$(cat cloud-login-output/exit-code.txt)"
+            fi
+            sleep 1
+          done
+          echo 'Cloud QR test timed out'
+          exit 1
+      - name: Save encrypted state and safe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-login-result-${{ github.run_id }}
+          path: |
+            cloud-login-output/state.encrypted.json
+            cloud-login-output/result.json
+            cloud-login-output/run.log
+          retention-days: 1
