@@ -10,5 +10,6 @@ artifacts/*
 config/tasks.json
 config/tasks/
 config.json
+cookie.json
 storage-state.json
 storage_state/
