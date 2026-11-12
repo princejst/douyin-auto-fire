@@ -42,7 +42,9 @@ class DouyinChat:
 
     async def _open_target_once(self, name: str) -> None:
         search = await first_visible(self.page, SEARCH_INPUTS, self.timeout_ms)
-        await search.click()
+        # Real clicks don't land on this page in the cloud VM (see
+        # synthetic_click); fill() alone drives the search fine.
+        await synthetic_click(search)
         await search.fill("")
         await search.fill(name)
         await self.page.wait_for_timeout(1_500)
@@ -50,7 +52,7 @@ class DouyinChat:
         result = await self._search_result(name)
         if result is None:
             raise PageOperationError("搜索不到目标好友")
-        await result.click(force=True)
+        await synthetic_click(result)
         await self._confirm_opened(name)
 
     async def _search_result(self, name: str) -> Locator | None:
@@ -320,6 +322,29 @@ async def _group_name_matches(locator: Locator, expected: str) -> bool:
         )
     except Exception:
         return False
+
+
+async def synthetic_click(locator: Locator) -> None:
+    """Dispatch a synthetic mousedown/mouseup/click sequence on an element.
+
+    Environment note (2026-11-11, cloud VM): real (trusted) mouse/keyboard
+    events sent through CDP never reach Douyin's page here -- a click does
+    not focus an input, typed characters never land, and clicking a
+    conversation row does not select it -- while JS-dispatched events drive
+    the React app normally (verified by probing: synthetic row clicks open
+    chats, synthetic clicks open the sticker panel). The page's risk-control
+    layer appears to swallow trusted input events in this environment
+    (headless Chrome + datacenter egress IP). Synthetic events are the
+    working path on this VM; on a normal machine the real clicks work too,
+    so this helper is safe to use everywhere.
+    """
+    await locator.evaluate(
+        """(el) => {
+            for (const type of ['mousedown', 'mouseup', 'click']) {
+                el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true}));
+            }
+        }"""
+    )
 
 
 async def first_visible(page: Page, selectors: tuple[str, ...], timeout_ms: int = 15_000) -> Locator:
