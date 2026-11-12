@@ -7,6 +7,7 @@ from app.douyin import PageOperationError
 from app.selectors import IMAGE_INPUTS
 from app.sender import (
     LATEST_OUTGOING_MESSAGE,
+    OUTGOING_MESSAGES,
     MESSAGE_CONFIRM_ANCHOR,
     SEND_BUTTONS,
     SEND_FAILURE_MARKERS,
@@ -213,7 +214,7 @@ async def test_random_message_delegates_to_selected_choice(monkeypatch) -> None:
     text = Message(type="text", content="你好")
     message = Message(type="random", choices=(text,))
     monkeypatch.setattr("app.sender.random.choice", lambda choices: choices[0])
-    monkeypatch.setattr("app.sender._mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "")))
+    monkeypatch.setattr("app.sender._mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "", 0)))
     monkeypatch.setattr("app.sender._confirm_outgoing_message", AsyncMock())
 
     await send_message(page, chat, message, {})
@@ -228,7 +229,7 @@ async def test_trigger_send_clicks_publish_button_when_visible() -> None:
     button = MagicMock()
     button.count = AsyncMock(return_value=1)
     button.is_visible = AsyncMock(return_value=True)
-    button.click = AsyncMock()
+    button.evaluate = AsyncMock()
     publish = MagicMock()
     publish.first = button
     missing_loc = MagicMock()
@@ -239,7 +240,7 @@ async def test_trigger_send_clicks_publish_button_when_visible() -> None:
 
     await _trigger_send(page)
 
-    button.click.assert_awaited_once_with()
+    button.evaluate.assert_awaited_once()
     page.keyboard.press.assert_not_called()
 
 
@@ -277,7 +278,7 @@ async def test_publish_ready_true_when_button_visible() -> None:
 async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> None:
     item = MagicMock()
     item.get_attribute = AsyncMock(return_value=None)
-    item.click = AsyncMock()
+    item.evaluate = AsyncMock()
     img_first = MagicMock()
     img_first.count = AsyncMock(return_value=0)
     img_loc = MagicMock()
@@ -302,7 +303,7 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
     monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
 
-    await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    await _click_and_confirm_sticker(page, item, ("anchor", "old", 0), "比心")
 
     assert calls["confirm"] == 2
     assert calls["publish"] == 1
@@ -312,7 +313,7 @@ async def test_sticker_click_retries_via_publish_when_staged(monkeypatch) -> Non
 async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -> None:
     item = MagicMock()
     item.get_attribute = AsyncMock(return_value=None)
-    item.click = AsyncMock()
+    item.evaluate = AsyncMock()
     img_first = MagicMock()
     img_first.count = AsyncMock(return_value=0)
     img_loc = MagicMock()
@@ -322,7 +323,7 @@ async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -
     marker = MagicMock()
     marker.count = AsyncMock(return_value=1)
     marker.is_visible = AsyncMock(return_value=True)
-    marker.click = AsyncMock()
+    marker.evaluate = AsyncMock()
     marker_group = MagicMock()
     marker_group.first = marker
 
@@ -351,18 +352,18 @@ async def test_sticker_click_retries_via_retry_marker_when_failed(monkeypatch) -
     monkeypatch.setattr("app.sender._trigger_send", fake_trigger)
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
 
-    await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+    await _click_and_confirm_sticker(page, item, ("anchor", "old", 0), "比心")
 
     assert calls["confirm"] == 2
     assert calls["publish"] == 0
-    marker.click.assert_awaited_once_with(force=True)
+    marker.evaluate.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_sticker_click_raises_when_not_staged(monkeypatch) -> None:
     item = MagicMock()
     item.get_attribute = AsyncMock(return_value=None)
-    item.click = AsyncMock()
+    item.evaluate = AsyncMock()
     img_first = MagicMock()
     img_first.count = AsyncMock(return_value=0)
     img_loc = MagicMock()
@@ -384,7 +385,7 @@ async def test_sticker_click_raises_when_not_staged(monkeypatch) -> None:
     monkeypatch.setattr("app.sender._publish_ready", fake_ready)
 
     with pytest.raises(PageOperationError):
-        await _click_and_confirm_sticker(page, item, ("anchor", "old"), "比心")
+        await _click_and_confirm_sticker(page, item, ("anchor", "old", 0), "比心")
 
 
 @pytest.mark.asyncio
@@ -418,7 +419,7 @@ async def test_sticker_confirmation_reports_page_send_failure() -> None:
     page.locator.side_effect = lambda selector: latest_group if selector == LATEST_OUTGOING_MESSAGE else anchors
 
     with pytest.raises(PageOperationError, match="发送失败"):
-        await _confirm_sticker_sent(page, ("anchor", "old-content"), "比心")
+        await _confirm_sticker_sent(page, ("anchor", "old-content", 0), "比心")
 
 
 @pytest.mark.asyncio
@@ -430,7 +431,7 @@ async def test_sticker_confirmation_reports_missing_new_message() -> None:
     page.locator.return_value = anchors
 
     with pytest.raises(PageOperationError, match="没有检测到新的已发送消息"):
-        await _confirm_sticker_sent(page, ("anchor", "old-content"), "比心")
+        await _confirm_sticker_sent(page, ("anchor", "old-content", 0), "比心")
 
 
 @pytest.mark.asyncio
@@ -450,21 +451,21 @@ async def test_send_text_confirms_outgoing_message_without_retry(monkeypatch) ->
     page.wait_for_function = AsyncMock()
     page.wait_for_timeout = AsyncMock()
     editor = MagicMock()
-    editor.click = AsyncMock()
+    editor.evaluate = AsyncMock()
     editor.page = page
     chat = MagicMock()
     chat.message_input = AsyncMock(return_value=editor)
     calls = {"trigger": 0, "confirm": 0}
 
     async def fake_mark(_page):
-        return ("anchor", "old-content")
+        return ("anchor", "old-content", 0)
 
     async def fake_trigger(_page):
         calls["trigger"] += 1
 
     async def fake_confirm(_page, before, label, resource_key="", expected_text=""):
         calls["confirm"] += 1
-        assert before == ("anchor", "old-content")
+        assert before == ("anchor", "old-content", 0)
         assert label == "文字"
         assert expected_text == "你好"
 
@@ -485,12 +486,12 @@ async def test_send_text_raises_when_confirmation_fails(monkeypatch) -> None:
     page.wait_for_function = AsyncMock()
     page.wait_for_timeout = AsyncMock()
     editor = MagicMock()
-    editor.click = AsyncMock()
+    editor.evaluate = AsyncMock()
     editor.page = page
     chat = MagicMock()
     chat.message_input = AsyncMock(return_value=editor)
 
-    monkeypatch.setattr("app.sender._mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "")))
+    monkeypatch.setattr("app.sender._mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "", 0)))
     monkeypatch.setattr("app.sender._trigger_send", AsyncMock())
 
     async def fail(_page, *_args, **_kwargs):
@@ -507,14 +508,14 @@ async def test_restore_composer_presses_escape_and_focuses(monkeypatch) -> None:
     page = MagicMock()
     page.keyboard.press = AsyncMock()
     editor = MagicMock()
-    editor.click = AsyncMock()
+    editor.evaluate = AsyncMock()
     editor.focus = AsyncMock()
     monkeypatch.setattr("app.sender.first_visible", AsyncMock(return_value=editor))
 
     await _restore_composer(page)
 
     page.keyboard.press.assert_awaited_once_with("Escape")
-    editor.click.assert_awaited_once()
+    editor.evaluate.assert_awaited_once()
     editor.focus.assert_awaited_once()
 
 
@@ -553,7 +554,7 @@ async def test_confirm_pending_then_success() -> None:
     timeline = _Timeline([(False, True), (False, True), (False, False), (False, False)])
     page = _FakePage(timeline)
 
-    await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+    await _confirm_outgoing_message(page, ("anchor", "old", 0), "文字", expected_text="测试文字")
 
     # State was polled; no fixed 3s sleep is used to declare success.
     assert 3_000 not in page.timeout_calls
@@ -567,7 +568,7 @@ async def test_confirm_pending_then_failure() -> None:
     page = _FakePage(timeline)
 
     with pytest.raises(PageOperationError, match="发送失败"):
-        await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+        await _confirm_outgoing_message(page, ("anchor", "old", 0), "文字", expected_text="测试文字")
 
 
 @pytest.mark.asyncio
@@ -576,7 +577,7 @@ async def test_confirm_failure_immediate() -> None:
     page = _FakePage(timeline)
 
     with pytest.raises(PageOperationError, match="发送失败"):
-        await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+        await _confirm_outgoing_message(page, ("anchor", "old", 0), "文字", expected_text="测试文字")
 
 
 @pytest.mark.asyncio
@@ -605,7 +606,7 @@ async def test_confirm_clean_then_late_failure_fails(monkeypatch) -> None:
     page = _FakePage(timeline)
 
     with pytest.raises(PageOperationError, match="发送失败"):
-        await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+        await _confirm_outgoing_message(page, ("anchor", "old", 0), "文字", expected_text="测试文字")
 
 
 @pytest.mark.asyncio
@@ -619,7 +620,7 @@ async def test_confirm_sustained_clean_reaches_success_via_grace(monkeypatch) ->
     monkeypatch.setattr(sender_module, "_monotonic", lambda: timeline.clock)
     page = _FakePage(timeline)
 
-    await _confirm_outgoing_message(page, ("anchor", "old"), "文字", expected_text="测试文字")
+    await _confirm_outgoing_message(page, ("anchor", "old", 0), "文字", expected_text="测试文字")
     # Grace window (2s) is well below the total timeout (15s).
     assert timeline.clock < 15.0
 
@@ -629,14 +630,15 @@ async def test_confirm_text_success_passes_expected_text() -> None:
     timeline = _Timeline([(False, False), (False, False)])
     page = _FakePage(timeline)
 
-    await _confirm_outgoing_message(page, ("anchor", "old-content"), "文字", expected_text="测试文字")
+    await _confirm_outgoing_message(page, ("anchor", "old-content", 0), "文字", expected_text="测试文字")
 
     assert page.wait_for_function.await_args.kwargs["arg"] == [
         LATEST_OUTGOING_MESSAGE,
-        "anchor",
+        OUTGOING_MESSAGES,
         "old-content",
         "",
         "测试文字",
+        0,
     ]
 
 
@@ -645,14 +647,15 @@ async def test_confirm_sticker_success_passes_resource_key(monkeypatch) -> None:
     timeline = _Timeline([(False, False), (False, False)])
     page = _FakePage(timeline)
 
-    await _confirm_sticker_sent(page, ("anchor", "old-content"), "比心", "resource-key")
+    await _confirm_sticker_sent(page, ("anchor", "old-content", 0), "比心", "resource-key")
 
     assert page.wait_for_function.await_args.kwargs["arg"] == [
         LATEST_OUTGOING_MESSAGE,
-        "anchor",
+        OUTGOING_MESSAGES,
         "old-content",
         "resource-key",
         "",
+        0,
     ]
 
 
@@ -667,7 +670,7 @@ async def test_send_image_fails_when_retry_appears(monkeypatch) -> None:
     # marker shows up. This must fail, not be counted as success.
     timeline = _Timeline([(True, False)])
     page = _FakePage(timeline, content_count=1)
-    monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old")))
+    monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old", 0)))
     monkeypatch.setattr(sender_module, "_trigger_send", AsyncMock())
 
     with pytest.raises(PageOperationError, match="发送失败"):
@@ -683,7 +686,7 @@ async def test_send_image_waits_for_terminal_state(monkeypatch) -> None:
     # state stabilises is it accepted.
     timeline = _Timeline([(False, True), (False, True), (False, False), (False, False)])
     page = _FakePage(timeline, content_count=1)
-    monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old")))
+    monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old", 0)))
     monkeypatch.setattr(sender_module, "_trigger_send", AsyncMock())
 
     await sender_module.send_image(page, "image.png")  # must not raise
@@ -1013,7 +1016,7 @@ async def test_real_image_delayed_failure(monkeypatch, tmp_path) -> None:
         clock = _VirtualClock(schedules=[(2200, mount_retry)])
         _patch_clock(monkeypatch, clock)
         page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
-        monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old")))
+        monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old", 0)))
         monkeypatch.setattr(sender_module, "_trigger_send", AsyncMock())
 
         async def wf_fn(*a, **k):
@@ -1042,7 +1045,7 @@ async def test_real_image_pending_then_success(monkeypatch, tmp_path) -> None:
         clock = _VirtualClock(schedules=[(40, mount_spin), (120, clear_spin)])
         _patch_clock(monkeypatch, clock)
         page.wait_for_timeout = lambda ms: clock.wait_for_timeout(ms, page)
-        monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old")))
+        monkeypatch.setattr(sender_module, "_mark_latest_outgoing_message", AsyncMock(return_value=("anchor", "old", 0)))
         monkeypatch.setattr(sender_module, "_trigger_send", AsyncMock())
         page.wait_for_function = AsyncMock(side_effect=lambda *a, **k: True)
 
