@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import Locator, Page
 
-from app.douyin import DouyinChat, PageOperationError, first_visible
+from app.douyin import DouyinChat, PageOperationError, first_visible, synthetic_click
 from app.models import Message, Sticker
 from app.selectors import IMAGE_INPUTS, MESSAGE_INPUTS, STICKER_BUTTONS, STICKER_PANELS
 
@@ -40,7 +40,7 @@ async def _trigger_send(page: Page) -> None:
         except Exception:
             continue
     if button is not None:
-        await button.click()
+        await synthetic_click(button)
     else:
         await page.keyboard.press("Enter")
 
@@ -58,6 +58,16 @@ async def _publish_ready(page: Page) -> bool:
 
 LATEST_OUTGOING_MESSAGE = (
     '.messageMessageListlist [data-index="0"] '
+    '.messageMessageBoxmessageBox:has(.messageMessageBoxcontentBox.messageMessageBoxisFromMe)'
+)
+# All outgoing bubbles in the rendered list, for counting. The anchor on the
+# latest message alone cannot prove a new message: a React re-render replaces
+# the anchored node, which the old check read as "new message" (false success
+# when the sticker click was actually a no-op). A genuine new message either
+# raises this count or changes the latest bubble's content; a re-render does
+# neither.
+OUTGOING_MESSAGES = (
+    '.messageMessageListlist '
     '.messageMessageBoxmessageBox:has(.messageMessageBoxcontentBox.messageMessageBoxisFromMe)'
 )
 MESSAGE_CONFIRM_ANCHOR = "data-douyin-sender-anchor"
@@ -139,7 +149,7 @@ async def send_message(page: Page, chat: DouyinChat, message: Message, stickers:
 async def send_text(chat: DouyinChat, content: str) -> None:
     editor = await chat.message_input()
     page = editor.page
-    await editor.click()
+    await synthetic_click(editor)
     await page.keyboard.insert_text(content)
     try:
         await page.wait_for_function(
@@ -205,7 +215,7 @@ async def _restore_composer(page: Page, timeout_ms: int = 10_000) -> None:
     except Exception:
         return
     try:
-        await editor.click(timeout=timeout_ms)
+        await synthetic_click(editor)
         await editor.focus()
     except Exception:
         pass
@@ -215,13 +225,13 @@ async def send_douyin_sticker(page: Page, sticker: Sticker) -> None:
     before = await _mark_latest_outgoing_message(page)
     try:
         button = await first_visible(page, STICKER_BUTTONS)
-        await button.click(force=True)
+        await synthetic_click(button)
         panel = await first_visible(page, STICKER_PANELS)
 
         if sticker.category:
             category = panel.get_by_text(sticker.category, exact=True)
             if await category.count() and await category.first.is_visible():
-                await category.first.click()
+                await synthetic_click(category.first)
 
         name = sticker.accessible_name or sticker.name
         item = panel.locator('.emojiEmojiItememojiItem').filter(has_text=name)
@@ -258,11 +268,12 @@ def _css_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-async def _mark_latest_outgoing_message(page: Page) -> tuple[str, str]:
+async def _mark_latest_outgoing_message(page: Page) -> tuple[str, str, int]:
     anchor = secrets.token_hex(8)
     latest = page.locator(LATEST_OUTGOING_MESSAGE).first
+    before_count = await page.locator(OUTGOING_MESSAGES).count()
     if not await latest.count():
-        return anchor, ""
+        return anchor, "", before_count
 
     content = latest.locator('[data-e2e="msg-item-content"]').first
     before_content = await content.inner_html() if await content.count() else await latest.inner_html()
@@ -270,12 +281,20 @@ async def _mark_latest_outgoing_message(page: Page) -> tuple[str, str]:
         "(element, value) => element.setAttribute('data-douyin-sender-anchor', value)",
         anchor,
     )
-    return anchor, before_content
+    return anchor, before_content, before_count
 
 
-async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str], name: str) -> None:
+async def _click_and_confirm_sticker(page: Page, item, before: tuple[str, str, int], name: str) -> None:
     resource_key = await _sticker_resource_key(item)
-    await item.click(force=True)
+    # The panel item's click handler lives on the inner image, not the
+    # wrapper: a synthetic click on the wrapper is a no-op (the panel stays
+    # open and no send request fires). Click the deepest element instead.
+    inner = item.locator("img").first
+    try:
+        target = inner if await inner.count() else item
+    except Exception:
+        target = item
+    await synthetic_click(target)
     try:
         await _confirm_sticker_sent(page, before, name, resource_key)
     except PageOperationError as exc:
@@ -302,7 +321,7 @@ async def _sticker_resource_key(item) -> str:
 
 async def _confirm_sticker_sent(
     page: Page,
-    before: tuple[str, str],
+    before: tuple[str, str, int],
     name: str,
     resource_key: str = "",
 ) -> None:
@@ -315,7 +334,7 @@ async def _click_retry_on_latest_failed_message(page: Page) -> bool:
         marker = latest.locator(selector).first
         try:
             if await marker.count() and await marker.is_visible():
-                await marker.click(force=True)
+                await synthetic_click(marker)
                 return True
         except Exception:
             continue
@@ -418,21 +437,26 @@ async def _await_send_terminal_state(
 
 async def _confirm_outgoing_message(
     page: Page,
-    before: tuple[str, str],
+    before: tuple[str, str, int],
     label: str,
     resource_key: str = "",
     expected_text: str = "",
 ) -> None:
-    anchor, before_content = before
+    _anchor, before_content, before_count = before
     try:
         await page.wait_for_function(
-            """([selector, anchor, previousContent, expectedResource, expectedText]) => {
+            """([selector, outgoingSelector, previousContent, expectedResource, expectedText, beforeCount]) => {
                 const message = document.querySelector(selector);
                 if (!message) return false;
                 const content = message.querySelector('[data-e2e="msg-item-content"]') || message;
+                // A re-render replaces the anchored node without changing
+                // anything, so the anchor alone must NOT count as "new":
+                // a genuine new message either raises the outgoing count
+                // (same content sent twice still adds a bubble) or changes
+                // the latest bubble's content. A re-render does neither.
+                const outgoingCount = document.querySelectorAll(outgoingSelector).length;
                 const isNewMessage =
-                    message.getAttribute('data-douyin-sender-anchor') !== anchor ||
-                    content.innerHTML !== previousContent;
+                    outgoingCount > beforeCount || content.innerHTML !== previousContent;
                 if (!isNewMessage) return false;
                 if (expectedText) {
                     const normalize = value => (value || '').replace(/[\\s\\u200B\\u200C\\u200D\\uFEFF]+/g, ' ').trim();
@@ -440,9 +464,9 @@ async def _confirm_outgoing_message(
                 }
                 if (!expectedResource) return true;
                 const images = [...content.querySelectorAll('img')];
-                return images.some(image => (image.src || '').includes(expectedResource)) || images.length > 0;
+                return images.some(image => (image.src || '').includes(expectedResource));
             }""",
-            arg=[LATEST_OUTGOING_MESSAGE, anchor, before_content, resource_key, expected_text],
+            arg=[LATEST_OUTGOING_MESSAGE, OUTGOING_MESSAGES, before_content, resource_key, expected_text, before_count],
             timeout=15_000,
         )
         # The bubble now matches our payload, but the send may still be in
